@@ -3,7 +3,10 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 from PIL import Image
+import tempfile
 import time
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration
+import av
 
 # Page configuration
 st.set_page_config(
@@ -48,9 +51,18 @@ confidence_threshold = st.sidebar.slider("Confidence Threshold", 0.0, 1.0, 0.5, 
 iou_threshold = st.sidebar.slider("IOU Threshold", 0.0, 1.0, 0.45, 0.05)
 model_path = st.sidebar.text_input("Model Path", "models/weapon_model.onnx")
 
+# Input mode selection
+input_mode = st.sidebar.radio("Input Mode", ["Real-Time Camera", "Upload Image", "Upload Video"])
+
 # Class names - adjust these based on your model
 CLASS_NAMES = ["gun", "knife"]
-    
+
+# RTC Configuration for STUN/TURN servers
+RTC_CONFIGURATION = RTCConfiguration(
+    {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+)
+
+@st.cache_resource
 def load_model(model_path):
     """Load ONNX model"""
     try:
@@ -77,7 +89,6 @@ def preprocess_image(img, input_shape=(640, 640)):
 
 def postprocess(outputs, img_shape, input_shape=(640, 640), conf_threshold=0.5, iou_threshold=0.45):
     """Post-process YOLOv11 outputs"""
-    # YOLOv11 output shape: (1, 84, 8400) for COCO or (1, num_classes+4, num_predictions)
     output = outputs[0]
     
     # Transpose to (num_predictions, num_classes+4)
@@ -154,111 +165,207 @@ def draw_detections(img, boxes, confidences, class_ids, class_names):
     
     return img
 
-# Main application
-col1, col2 = st.columns([2, 1])
-
-with col1:
-    st.subheader("Camera Feed")
-    frame_placeholder = st.empty()
+def process_image(img, model, conf_thresh, iou_thresh):
+    """Process a single image"""
+    # Preprocess
+    input_tensor = preprocess_image(img)
     
-with col2:
-    st.subheader("Detection Statistics")
-    stats_placeholder = st.empty()
-
-# Start/Stop buttons
-start_button = st.button("Start Detection")
-stop_button = st.button("Stop Detection")
-
-# Initialize session state
-if 'run' not in st.session_state:
-    st.session_state.run = False
-
-if start_button:
-    st.session_state.run = True
+    # Inference
+    input_name = model.get_inputs()[0].name
+    outputs = model.run(None, {input_name: input_tensor})
     
-if stop_button:
-    st.session_state.run = False
-
-# Load model
-if st.session_state.run:
-    model = load_model(model_path)
+    # Postprocess
+    boxes, confidences, class_ids = postprocess(
+        outputs,
+        img.shape,
+        conf_threshold=conf_thresh,
+        iou_threshold=iou_thresh
+    )
     
-    if model is not None:
-        # Open camera
-        cap = cv2.VideoCapture(0)
+    # Draw detections
+    img_with_detections = draw_detections(
+        img.copy(),
+        boxes,
+        confidences,
+        class_ids,
+        CLASS_NAMES
+    )
+    
+    return img_with_detections, boxes, confidences, class_ids
+
+# Video Transformer for WebRTC
+class WeaponDetectionTransformer(VideoTransformerBase):
+    def __init__(self):
+        self.model = load_model(model_path)
+        self.conf_threshold = confidence_threshold
+        self.iou_threshold = iou_threshold
+        self.detection_count = 0
+        self.detections = []
         
-        if not cap.isOpened():
-            st.error("Cannot access camera. Please check your camera connection.")
-            st.session_state.run = False
-        else:
-            fps_list = []
-            
-            while st.session_state.run:
-                start_time = time.time()
+    def transform(self, frame):
+        img = frame.to_ndarray(format="bgr24")
+        
+        if self.model is not None:
+            try:
+                # Process frame
+                img_with_detections, boxes, confidences, class_ids = process_image(
+                    img, self.model, self.conf_threshold, self.iou_threshold
+                )
                 
+                # Update detection stats
+                self.detection_count = len(boxes)
+                self.detections = list(zip(boxes, confidences, class_ids))
+                
+                return av.VideoFrame.from_ndarray(img_with_detections, format="bgr24")
+            except Exception as e:
+                st.error(f"Error processing frame: {e}")
+                return frame
+        
+        return frame
+
+# Main application
+if input_mode == "Real-Time Camera":
+    st.subheader("Real-Time Camera Detection")
+    st.info("🎥 Allow camera access when prompted by your browser. This works in both local and cloud deployments!")
+    
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        # WebRTC streamer
+        ctx = webrtc_streamer(
+            key="weapon-detection",
+            video_transformer_factory=WeaponDetectionTransformer,
+            rtc_configuration=RTC_CONFIGURATION,
+            media_stream_constraints={"video": True, "audio": False},
+            async_processing=True,
+        )
+    
+    with col2:
+        st.subheader("Detection Statistics")
+        stats_placeholder = st.empty()
+        
+        # Display live stats
+        if ctx.video_transformer:
+            with stats_placeholder.container():
+                st.metric("Detections", ctx.video_transformer.detection_count)
+                
+                if ctx.video_transformer.detection_count > 0:
+                    st.warning("⚠️ Weapon Detected!")
+                    for box, conf, class_id in ctx.video_transformer.detections:
+                        if class_id < len(CLASS_NAMES):
+                            st.write(f"**{CLASS_NAMES[class_id]}**: {conf:.2%}")
+                else:
+                    st.success("✅ No weapons detected")
+
+elif input_mode == "Upload Image":
+    st.subheader("Upload Image for Detection")
+    uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"])
+    
+    if uploaded_file is not None:
+        # Load model
+        model = load_model(model_path)
+        
+        if model is not None:
+            # Read image
+            file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+            img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+            
+            # Process image
+            with st.spinner("Processing..."):
+                img_with_detections, boxes, confidences, class_ids = process_image(
+                    img, model, confidence_threshold, iou_threshold
+                )
+            
+            # Display results
+            col1, col2 = st.columns([2, 1])
+            
+            with col1:
+                st.subheader("Detection Result")
+                img_rgb = cv2.cvtColor(img_with_detections, cv2.COLOR_BGR2RGB)
+                st.image(img_rgb, use_container_width=True)
+            
+            with col2:
+                st.subheader("Detection Statistics")
+                st.metric("Detections", len(boxes))
+                
+                if len(boxes) > 0:
+                    st.warning("⚠️ Weapon Detected!")
+                    for i, (conf, class_id) in enumerate(zip(confidences, class_ids)):
+                        if class_id < len(CLASS_NAMES):
+                            st.write(f"**{CLASS_NAMES[class_id]}**: {conf:.2%}")
+                else:
+                    st.success("✅ No weapons detected")
+
+else:  # Upload Video
+    st.subheader("Upload Video for Detection")
+    uploaded_file = st.file_uploader("Choose a video...", type=["mp4", "avi", "mov"])
+    
+    if uploaded_file is not None:
+        # Load model
+        model = load_model(model_path)
+        
+        if model is not None:
+            # Save uploaded video to temp file
+            tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
+            tfile.write(uploaded_file.read())
+            
+            # Process video
+            cap = cv2.VideoCapture(tfile.name)
+            
+            frame_placeholder = st.empty()
+            stats_placeholder = st.empty()
+            progress_bar = st.progress(0)
+            
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            frame_count = 0
+            
+            stop_button = st.button("Stop Processing")
+            
+            # Process every nth frame for faster processing
+            frame_skip = st.sidebar.slider("Process every N frames", 1, 10, 3)
+            
+            while cap.isOpened() and not stop_button:
                 ret, frame = cap.read()
                 if not ret:
-                    st.error("Failed to read from camera")
                     break
                 
-                # Preprocess
-                input_tensor = preprocess_image(frame)
+                frame_count += 1
                 
-                # Inference
-                input_name = model.get_inputs()[0].name
-                outputs = model.run(None, {input_name: input_tensor})
+                # Skip frames for faster processing
+                if frame_count % frame_skip != 0:
+                    continue
                 
-                # Postprocess
-                boxes, confidences, class_ids = postprocess(
-                    outputs,
-                    frame.shape,
-                    conf_threshold=confidence_threshold,
-                    iou_threshold=iou_threshold
+                # Process frame
+                frame_with_detections, boxes, confidences, class_ids = process_image(
+                    frame, model, confidence_threshold, iou_threshold
                 )
-                
-                # Draw detections
-                frame_with_detections = draw_detections(
-                    frame.copy(),
-                    boxes,
-                    confidences,
-                    class_ids,
-                    CLASS_NAMES
-                )
-                
-                # Calculate FPS
-                end_time = time.time()
-                fps = 1 / (end_time - start_time)
-                fps_list.append(fps)
-                if len(fps_list) > 30:
-                    fps_list.pop(0)
-                avg_fps = np.mean(fps_list)
-                
-                # Add FPS to frame
-                cv2.putText(frame_with_detections, f"FPS: {avg_fps:.2f}", 
-                           (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-                
-                # Convert to RGB for display
-                frame_rgb = cv2.cvtColor(frame_with_detections, cv2.COLOR_BGR2RGB)
                 
                 # Display frame
+                frame_rgb = cv2.cvtColor(frame_with_detections, cv2.COLOR_BGR2RGB)
                 frame_placeholder.image(frame_rgb, channels="RGB", use_container_width=True)
                 
                 # Display statistics
                 with stats_placeholder.container():
                     st.metric("Detections", len(boxes))
-                    st.metric("Average FPS", f"{avg_fps:.2f}")
+                    st.metric("Frame", f"{frame_count}/{total_frames}")
                     
                     if len(boxes) > 0:
                         st.warning("⚠️ Weapon Detected!")
                         for i, (conf, class_id) in enumerate(zip(confidences, class_ids)):
                             if class_id < len(CLASS_NAMES):
                                 st.write(f"**{CLASS_NAMES[class_id]}**: {conf:.2%}")
-                    else:
-                        st.success("✅ No weapons detected")
+                
+                # Update progress
+                progress_bar.progress(min(frame_count / total_frames, 1.0))
             
             cap.release()
-    else:
-        st.session_state.run = False
+            st.success("Video processing complete!")
 
 st.markdown("---")
-st.info("📝 **Note**: Make sure your ONNX model file is in the same directory or provide the correct path in the sidebar.")
+st.info("""
+📝 **Usage Notes**:
+- **Real-Time Camera**: Works on both local and cloud deployments using WebRTC
+- **Upload Image/Video**: Process pre-recorded media
+- Make sure your ONNX model file is in the correct path
+- Adjust confidence and IOU thresholds in the sidebar for better results
+""")

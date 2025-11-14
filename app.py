@@ -5,8 +5,10 @@ import onnxruntime as ort
 from PIL import Image
 import tempfile
 import time
-from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration
+from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
 import av
+import queue
+import threading
 
 # Page configuration
 st.set_page_config(
@@ -64,8 +66,6 @@ RTC_CONFIGURATION = RTCConfiguration(
             {"urls": ["stun:stun.l.google.com:19302"]},
             {"urls": ["stun:stun1.l.google.com:19302"]},
             {"urls": ["stun:stun2.l.google.com:19302"]},
-            {"urls": ["stun:stun3.l.google.com:19302"]},
-            {"urls": ["stun:stun4.l.google.com:19302"]},
         ]
     }
 )
@@ -201,35 +201,31 @@ def process_image(img, model, conf_thresh, iou_thresh):
     
     return img_with_detections, boxes, confidences, class_ids
 
-# Video Transformer for WebRTC
-class WeaponDetectionTransformer(VideoTransformerBase):
-    def __init__(self):
-        self.model = load_model(model_path)
-        self.conf_threshold = confidence_threshold
-        self.iou_threshold = iou_threshold
-        self.detection_count = 0
-        self.detections = []
-        
-    def transform(self, frame):
-        img = frame.to_ndarray(format="bgr24")
-        
-        if self.model is not None:
-            try:
-                # Process frame
-                img_with_detections, boxes, confidences, class_ids = process_image(
-                    img, self.model, self.conf_threshold, self.iou_threshold
-                )
-                
-                # Update detection stats
-                self.detection_count = len(boxes)
-                self.detections = list(zip(boxes, confidences, class_ids))
-                
-                return av.VideoFrame.from_ndarray(img_with_detections, format="bgr24")
-            except Exception as e:
-                st.error(f"Error processing frame: {e}")
-                return frame
-        
-        return frame
+# Callback function for video processing (new API)
+def video_frame_callback(frame):
+    img = frame.to_ndarray(format="bgr24")
+    
+    # Get model from session state
+    if 'model' in st.session_state and st.session_state.model is not None:
+        try:
+            # Process frame
+            img_with_detections, boxes, confidences, class_ids = process_image(
+                img, 
+                st.session_state.model, 
+                st.session_state.get('conf_threshold', 0.5),
+                st.session_state.get('iou_threshold', 0.45)
+            )
+            
+            # Store detection info in session state
+            st.session_state.detection_count = len(boxes)
+            st.session_state.detections = list(zip(boxes, confidences, class_ids))
+            
+            return av.VideoFrame.from_ndarray(img_with_detections, format="bgr24")
+        except Exception as e:
+            print(f"Error processing frame: {e}")
+            return frame
+    
+    return frame
 
 # Main application
 if input_mode == "Real-Time Camera":
@@ -281,28 +277,35 @@ if input_mode == "Real-Time Camera":
         - ❌ Mobile browsers: May have issues
         """)
     
+    # Load model and store in session state
+    if 'model' not in st.session_state:
+        st.session_state.model = load_model(model_path)
+        st.session_state.conf_threshold = confidence_threshold
+        st.session_state.iou_threshold = iou_threshold
+        st.session_state.detection_count = 0
+        st.session_state.detections = []
+    
+    # Update thresholds in session state
+    st.session_state.conf_threshold = confidence_threshold
+    st.session_state.iou_threshold = iou_threshold
+    
     col1, col2 = st.columns([2, 1])
     
     with col1:
-        # WebRTC streamer with improved settings
+        # WebRTC streamer with new API
         ctx = webrtc_streamer(
             key="weapon-detection",
-            video_transformer_factory=WeaponDetectionTransformer,
+            mode=WebRtcMode.SENDRECV,
             rtc_configuration=rtc_config,
             media_stream_constraints={
                 "video": {
                     "width": {"ideal": 1280},
                     "height": {"ideal": 720},
-                    "frameRate": {"ideal": 30, "max": 60}
                 },
                 "audio": False
             },
+            video_frame_callback=video_frame_callback,
             async_processing=True,
-            video_html_attrs={
-                "style": {"width": "100%", "margin": "0 auto", "border": "2px solid #FF4B4B"},
-                "controls": False,
-                "autoPlay": True,
-            },
         )
     
     with col2:
@@ -310,17 +313,19 @@ if input_mode == "Real-Time Camera":
         stats_placeholder = st.empty()
         
         # Display live stats
-        if ctx.video_transformer:
-            with stats_placeholder.container():
-                st.metric("Detections", ctx.video_transformer.detection_count)
-                
-                if ctx.video_transformer.detection_count > 0:
-                    st.warning("⚠️ Weapon Detected!")
-                    for box, conf, class_id in ctx.video_transformer.detections:
-                        if class_id < len(CLASS_NAMES):
-                            st.write(f"**{CLASS_NAMES[class_id]}**: {conf:.2%}")
-                else:
-                    st.success("✅ No weapons detected")
+        with stats_placeholder.container():
+            detection_count = st.session_state.get('detection_count', 0)
+            detections = st.session_state.get('detections', [])
+            
+            st.metric("Detections", detection_count)
+            
+            if detection_count > 0:
+                st.warning("⚠️ Weapon Detected!")
+                for box, conf, class_id in detections:
+                    if class_id < len(CLASS_NAMES):
+                        st.write(f"**{CLASS_NAMES[class_id]}**: {conf:.2%}")
+            else:
+                st.success("✅ No weapons detected")
 
 elif input_mode == "Upload Image":
     st.subheader("Upload Image for Detection")

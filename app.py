@@ -17,34 +17,8 @@ st.set_page_config(
     layout="wide"
 )
 
-# Custom CSS for fixed header
-st.markdown("""
-    <style>
-    .fixed-header {
-        position: fixed;
-        top: 0;
-        left: 0;
-        right: 0;
-        background-color: #0E1117;
-        z-index: 999;
-        padding: 1rem 3rem;
-        border-bottom: 2px solid #FF4B4B;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-    }
-    .fixed-header h1 {
-        margin: 0;
-        color: #FAFAFA;
-        font-size: 2rem;
-    }
-    .main-content {
-        margin-top: 5rem;
-    }
-    </style>
-    <div class="fixed-header">
-        <h1>🔫 Real-Time Weapon Detection with YOLOv11</h1>
-    </div>
-    <div class="main-content"></div>
-""", unsafe_allow_html=True)
+# Title and description
+st.title("🔫 Real-Time Weapon Detection with YOLOv11")
 st.markdown("---")
 
 # Sidebar configuration

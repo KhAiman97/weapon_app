@@ -379,57 +379,136 @@ else:  # Upload Video
             tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
             tfile.write(uploaded_file.read())
             
-            # Process video
+            # Get video properties
             cap = cv2.VideoCapture(tfile.name)
-            
-            frame_placeholder = st.empty()
-            stats_placeholder = st.empty()
-            progress_bar = st.progress(0)
-            
+            fps = int(cap.get(cv2.CAP_PROP_FPS))
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            frame_count = 0
-            
-            stop_button = st.button("Stop Processing")
+            cap.release()
             
             # Process every nth frame for faster processing
-            frame_skip = st.sidebar.slider("Process every N frames", 1, 10, 3)
+            frame_skip = st.sidebar.slider("Process every N frames", 1, 10, 1)
             
-            while cap.isOpened() and not stop_button:
-                ret, frame = cap.read()
-                if not ret:
-                    break
+            # Start processing button
+            process_button = st.button("🎬 Start Processing Video")
+            
+            if process_button:
+                # Create output video file
+                output_path = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4').name
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                out = cv2.VideoWriter(output_path, fourcc, fps // frame_skip, (width, height))
                 
-                frame_count += 1
+                # Reopen video for processing
+                cap = cv2.VideoCapture(tfile.name)
                 
-                # Skip frames for faster processing
-                if frame_count % frame_skip != 0:
-                    continue
+                # Create placeholders
+                col1, col2 = st.columns([2, 1])
                 
-                # Process frame
-                frame_with_detections, boxes, confidences, class_ids = process_image(
-                    frame, model, confidence_threshold, iou_threshold
+                with col1:
+                    frame_placeholder = st.empty()
+                
+                with col2:
+                    stats_placeholder = st.empty()
+                
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                frame_count = 0
+                processed_count = 0
+                detection_summary = []
+                
+                # Process video
+                while cap.isOpened():
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                    
+                    frame_count += 1
+                    
+                    # Skip frames for faster processing
+                    if frame_count % frame_skip != 0:
+                        continue
+                    
+                    processed_count += 1
+                    
+                    # Process frame
+                    frame_with_detections, boxes, confidences, class_ids = process_image(
+                        frame, model, confidence_threshold, iou_threshold
+                    )
+                    
+                    # Write to output video
+                    out.write(frame_with_detections)
+                    
+                    # Store detection info
+                    if len(boxes) > 0:
+                        detection_summary.append({
+                            'frame': frame_count,
+                            'time': frame_count / fps,
+                            'detections': len(boxes),
+                            'classes': [CLASS_NAMES[cid] if cid < len(CLASS_NAMES) else f"Class {cid}" 
+                                       for cid in class_ids]
+                        })
+                    
+                    # Display current frame every 10 processed frames
+                    if processed_count % 10 == 0:
+                        frame_rgb = cv2.cvtColor(frame_with_detections, cv2.COLOR_BGR2RGB)
+                        frame_placeholder.image(frame_rgb, channels="RGB", use_container_width=True)
+                        
+                        # Display statistics
+                        with stats_placeholder.container():
+                            st.metric("Current Frame", f"{frame_count}/{total_frames}")
+                            st.metric("Detections in Frame", len(boxes))
+                            st.metric("Total Detections", len(detection_summary))
+                            
+                            if len(boxes) > 0:
+                                st.warning("⚠️ Weapon Detected!")
+                                for i, (conf, class_id) in enumerate(zip(confidences, class_ids)):
+                                    if class_id < len(CLASS_NAMES):
+                                        st.write(f"**{CLASS_NAMES[class_id]}**: {conf:.2%}")
+                    
+                    # Update progress
+                    progress = frame_count / total_frames
+                    progress_bar.progress(progress)
+                    status_text.text(f"Processing: {frame_count}/{total_frames} frames ({progress*100:.1f}%)")
+                
+                # Release resources
+                cap.release()
+                out.release()
+                
+                # Show completion
+                progress_bar.progress(1.0)
+                status_text.text("✅ Processing complete!")
+                st.success("🎉 Video processing complete!")
+                
+                # Display final processed video
+                st.subheader("📹 Processed Video")
+                
+                # Read the processed video file
+                with open(output_path, 'rb') as video_file:
+                    video_bytes = video_file.read()
+                    st.video(video_bytes)
+                
+                # Download button for processed video
+                st.download_button(
+                    label="⬇️ Download Processed Video",
+                    data=video_bytes,
+                    file_name="weapon_detection_output.mp4",
+                    mime="video/mp4"
                 )
                 
-                # Display frame
-                frame_rgb = cv2.cvtColor(frame_with_detections, cv2.COLOR_BGR2RGB)
-                frame_placeholder.image(frame_rgb, channels="RGB", use_container_width=True)
-                
-                # Display statistics
-                with stats_placeholder.container():
-                    st.metric("Detections", len(boxes))
-                    st.metric("Frame", f"{frame_count}/{total_frames}")
+                # Display detection summary
+                if len(detection_summary) > 0:
+                    st.subheader("📊 Detection Summary")
+                    st.warning(f"⚠️ Weapons detected in {len(detection_summary)} frames")
                     
-                    if len(boxes) > 0:
-                        st.warning("⚠️ Weapon Detected!")
-                        for i, (conf, class_id) in enumerate(zip(confidences, class_ids)):
-                            if class_id < len(CLASS_NAMES):
-                                st.write(f"**{CLASS_NAMES[class_id]}**: {conf:.2%}")
-                
-                # Update progress
-                progress_bar.progress(min(frame_count / total_frames, 1.0))
-            
-            cap.release()
-            st.success("Video processing complete!")
+                    # Create expandable section for details
+                    with st.expander("View Detailed Detection Log"):
+                        for det in detection_summary:
+                            time_str = time.strftime('%M:%S', time.gmtime(det['time']))
+                            st.write(f"**Frame {det['frame']}** (at {time_str}): {det['detections']} detection(s) - {', '.join(det['classes'])}")
+                else:
+                    st.success("✅ No weapons detected in the entire video")
 
 st.markdown("---")
 st.info("""

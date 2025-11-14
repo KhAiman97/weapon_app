@@ -59,7 +59,15 @@ CLASS_NAMES = ["gun", "knife"]
 
 # RTC Configuration for STUN/TURN servers
 RTC_CONFIGURATION = RTCConfiguration(
-    {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+    {
+        "iceServers": [
+            {"urls": ["stun:stun.l.google.com:19302"]},
+            {"urls": ["stun:stun1.l.google.com:19302"]},
+            {"urls": ["stun:stun2.l.google.com:19302"]},
+            {"urls": ["stun:stun3.l.google.com:19302"]},
+            {"urls": ["stun:stun4.l.google.com:19302"]},
+        ]
+    }
 )
 
 @st.cache_resource
@@ -226,18 +234,75 @@ class WeaponDetectionTransformer(VideoTransformerBase):
 # Main application
 if input_mode == "Real-Time Camera":
     st.subheader("Real-Time Camera Detection")
+    
+    # Configuration options
+    use_turn = st.sidebar.checkbox("Use TURN Server (for difficult networks)", value=False)
+    
+    # Update RTC configuration based on selection
+    if use_turn:
+        rtc_config = RTCConfiguration(
+            {
+                "iceServers": [
+                    {"urls": ["stun:stun.l.google.com:19302"]},
+                    # Free public TURN server (limited capacity)
+                    {
+                        "urls": ["turn:openrelay.metered.ca:80"],
+                        "username": "openrelayproject",
+                        "credential": "openrelayproject"
+                    },
+                    {
+                        "urls": ["turn:openrelay.metered.ca:443"],
+                        "username": "openrelayproject",
+                        "credential": "openrelayproject"
+                    },
+                ]
+            }
+        )
+        st.info("🔄 Using TURN server for better connectivity through firewalls")
+    else:
+        rtc_config = RTC_CONFIGURATION
+    
     st.info("🎥 Allow camera access when prompted by your browser. This works in both local and cloud deployments!")
+    
+    with st.expander("📡 Troubleshooting Connection Issues"):
+        st.markdown("""
+        **If the camera connection fails:**
+        1. ✅ Make sure you allowed camera access in your browser
+        2. ✅ Try enabling "Use TURN Server" in the sidebar
+        3. ✅ Check if your network/firewall blocks WebRTC
+        4. ✅ Try a different browser (Chrome/Edge usually work best)
+        5. ✅ If on corporate network, it might block WebRTC ports
+        6. ✅ Try refreshing the page and allowing camera again
+        
+        **Browser Compatibility:**
+        - ✅ Chrome/Edge: Excellent support
+        - ✅ Firefox: Good support
+        - ⚠️ Safari: Limited support
+        - ❌ Mobile browsers: May have issues
+        """)
     
     col1, col2 = st.columns([2, 1])
     
     with col1:
-        # WebRTC streamer
+        # WebRTC streamer with improved settings
         ctx = webrtc_streamer(
             key="weapon-detection",
             video_transformer_factory=WeaponDetectionTransformer,
-            rtc_configuration=RTC_CONFIGURATION,
-            media_stream_constraints={"video": True, "audio": False},
+            rtc_configuration=rtc_config,
+            media_stream_constraints={
+                "video": {
+                    "width": {"ideal": 1280},
+                    "height": {"ideal": 720},
+                    "frameRate": {"ideal": 30, "max": 60}
+                },
+                "audio": False
+            },
             async_processing=True,
+            video_html_attrs={
+                "style": {"width": "100%", "margin": "0 auto", "border": "2px solid #FF4B4B"},
+                "controls": False,
+                "autoPlay": True,
+            },
         )
     
     with col2:

@@ -5,6 +5,7 @@ import onnxruntime as ort
 from PIL import Image
 import tempfile
 import time
+import os
 from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
 import av
 import queue
@@ -352,7 +353,8 @@ else:  # Upload Video
             # Save uploaded video to temp file
             tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
             tfile.write(uploaded_file.read())
-            
+            tfile.close()  # Close the file handle so OpenCV can access it
+
             # Get video properties
             cap = cv2.VideoCapture(tfile.name)
             fps = int(cap.get(cv2.CAP_PROP_FPS))
@@ -363,16 +365,42 @@ else:  # Upload Video
             
             # Process every nth frame for faster processing
             frame_skip = st.sidebar.slider("Process every N frames", 1, 10, 1)
-            
+
+            # Video processing options
+            st.info(f"📊 Video Info: {width}x{height} @ {fps} FPS, Total: {total_frames} frames")
+
             # Start processing button
             process_button = st.button("🎬 Start Processing Video")
             
             if process_button:
                 # Create output video file
                 output_path = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4').name
-                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                out = cv2.VideoWriter(output_path, fourcc, fps // frame_skip, (width, height))
-                
+
+                # Try different codecs for better compatibility
+                # If frame_skip > 1, adjust fps accordingly, otherwise use original fps
+                output_fps = fps // frame_skip if frame_skip > 1 else fps
+
+                # Try H264 first, fallback to mp4v if it fails
+                fourcc_options = ['avc1', 'h264', 'H264', 'X264', 'mp4v']
+                out = None
+
+                for codec in fourcc_options:
+                    try:
+                        fourcc = cv2.VideoWriter_fourcc(*codec)
+                        out = cv2.VideoWriter(output_path, fourcc, output_fps, (width, height))
+                        if out.isOpened():
+                            st.info(f"Using codec: {codec}")
+                            break
+                        else:
+                            out.release()
+                    except:
+                        continue
+
+                if out is None or not out.isOpened():
+                    st.error("Failed to create video writer. Trying MP4V codec...")
+                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                    out = cv2.VideoWriter(output_path, fourcc, output_fps, (width, height))
+
                 # Reopen video for processing
                 cap = cv2.VideoCapture(tfile.name)
                 
@@ -449,19 +477,41 @@ else:  # Upload Video
                 # Release resources
                 cap.release()
                 out.release()
-                
+
+                # Give a moment for file system to sync
+                time.sleep(0.5)
+
                 # Show completion
                 progress_bar.progress(1.0)
                 status_text.text("✅ Processing complete!")
                 st.success("🎉 Video processing complete!")
-                
-                # Display final processed video
-                st.subheader("📹 Processed Video")
-                
-                # Read the processed video file
-                with open(output_path, 'rb') as video_file:
-                    video_bytes = video_file.read()
-                    st.video(video_bytes)
+
+                # Verify output file exists and has content
+                if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                    # Display final frame
+                    if processed_count > 0:
+                        # Show the last processed frame
+                        cap_final = cv2.VideoCapture(output_path)
+                        ret, last_frame = cap_final.read()
+                        if ret:
+                            frame_rgb = cv2.cvtColor(last_frame, cv2.COLOR_BGR2RGB)
+                            frame_placeholder.image(frame_rgb, channels="RGB", use_container_width=True)
+                        cap_final.release()
+
+                    # Display final processed video
+                    st.subheader("📹 Processed Video")
+
+                    # Read the processed video file
+                    with open(output_path, 'rb') as video_file:
+                        video_bytes = video_file.read()
+
+                    # Display video using Streamlit's native video player
+                    if len(video_bytes) > 0:
+                        st.video(video_bytes, format="video/mp4", start_time=0)
+                    else:
+                        st.error("Video file is empty. There may have been an issue with the codec.")
+                else:
+                    st.error(f"Output video file not found or is empty: {output_path}")
                 
                 # Download button for processed video
                 st.download_button(

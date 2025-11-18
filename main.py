@@ -1,4 +1,4 @@
-\from fastapi import FastAPI, File, UploadFile, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, UploadFile, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn

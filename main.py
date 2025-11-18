@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, WebSocket, WebSocketDisconnect
+\from fastapi import FastAPI, File, UploadFile, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
@@ -13,6 +13,10 @@ import tempfile
 import asyncio
 from typing import List
 import json
+import warnings
+
+# Suppress NNPACK warnings
+warnings.filterwarnings('ignore', category=UserWarning)
 
 app = FastAPI(title="YOLOv11 Detection API")
 

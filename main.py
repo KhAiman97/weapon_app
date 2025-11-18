@@ -211,22 +211,25 @@ async def detect_video(
                         }
                         detections.append(detection)
                 
-                # Encode frame as base64 JPEG
-                _, buffer = cv2.imencode('.jpg', frame)
-                frame_base64 = base64.b64encode(buffer).decode('utf-8')
-                
-                # Stream frame result with snapshot
-                yield json.dumps({
-                    "type": "frame",
-                    "frame_number": frame_count,
-                    "timestamp": frame_count / fps if fps > 0 else 0,
-                    "detections": detections,
-                    "count": len(detections),
-                    "snapshot": frame_base64
-                }) + "\n"
+                # Only return frames with detections
+                if len(detections) > 0:
+                    # Encode frame as base64 JPEG
+                    _, buffer = cv2.imencode('.jpg', frame)
+                    frame_base64 = base64.b64encode(buffer).decode('utf-8')
+                    
+                    # Stream frame result with snapshot
+                    yield json.dumps({
+                        "type": "frame",
+                        "frame_number": frame_count,
+                        "timestamp": frame_count / fps if fps > 0 else 0,
+                        "detections": detections,
+                        "count": len(detections),
+                        "snapshot": frame_base64
+                    }) + "\n"
+                    
+                    processed_count += 1
                 
                 frame_count += 1
-                processed_count += 1
             
             # Send completion message
             yield json.dumps({

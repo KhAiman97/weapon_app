@@ -115,29 +115,33 @@ async def detect_image(file: UploadFile = File(...), confidence: float = 0.25):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Detection failed: {str(e)}")
 
-# 2. VIDEO DETECTION
+# 2. VIDEO DETECTION (Streaming Response)
 @app.post("/detect/video")
 async def detect_video(
     file: UploadFile = File(...), 
     confidence: float = 0.25,
-    skip_frames: int = 1
+    skip_frames: int = 5,
+    max_frames: int = 300
 ):
     """
-    Detect objects in an uploaded video
+    Detect objects in an uploaded video with streaming response
     
     Args:
         file: Video file (mp4, avi, etc.)
         confidence: Confidence threshold (default: 0.25)
-        skip_frames: Process every Nth frame (default: 1 = all frames)
+        skip_frames: Process every Nth frame (default: 5 for faster processing)
+        max_frames: Maximum frames to process (default: 300)
     
     Returns:
-        JSON with detection results per frame
+        Streaming JSON with detection results per frame
     """
     if model is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
     
     if not file.content_type.startswith("video/"):
         raise HTTPException(status_code=400, detail="File must be a video")
+    
+    temp_video_path = None
     
     try:
         # Save uploaded video to temporary file
@@ -150,6 +154,8 @@ async def detect_video(
         cap = cv2.VideoCapture(temp_video_path)
         
         if not cap.isOpened():
+            if temp_video_path and os.path.exists(temp_video_path):
+                os.unlink(temp_video_path)
             raise HTTPException(status_code=400, detail="Could not open video file")
         
         fps = cap.get(cv2.CAP_PROP_FPS)
@@ -157,66 +163,80 @@ async def detect_video(
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         
-        frame_results = []
-        frame_count = 0
-        
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
+        async def generate_results():
+            frame_count = 0
+            processed_count = 0
             
-            # Skip frames if specified
-            if frame_count % skip_frames != 0:
-                frame_count += 1
-                continue
-            
-            # Run detection
-            results = model(frame, conf=confidence)
-            
-            detections = []
-            for result in results:
-                boxes = result.boxes
-                for box in boxes:
-                    detection = {
-                        "class_id": int(box.cls[0]),
-                        "class_name": model.names[int(box.cls[0])],
-                        "confidence": float(box.conf[0]),
-                        "bbox": {
-                            "x1": float(box.xyxy[0][0]),
-                            "y1": float(box.xyxy[0][1]),
-                            "x2": float(box.xyxy[0][2]),
-                            "y2": float(box.xyxy[0][3])
-                        }
-                    }
-                    detections.append(detection)
-            
-            frame_results.append({
-                "frame_number": frame_count,
-                "timestamp": frame_count / fps,
-                "detections": detections,
-                "count": len(detections)
-            })
-            
-            frame_count += 1
-        
-        cap.release()
-        os.unlink(temp_video_path)  # Delete temp file
-        
-        return JSONResponse(content={
-            "success": True,
-            "video_info": {
+            # Send video info first
+            yield json.dumps({
+                "type": "video_info",
                 "fps": fps,
                 "total_frames": total_frames,
-                "processed_frames": len(frame_results),
                 "width": width,
                 "height": height,
                 "duration_seconds": total_frames / fps if fps > 0 else 0
-            },
-            "frames": frame_results
-        })
+            }) + "\n"
+            
+            while cap.isOpened() and processed_count < max_frames:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                
+                # Skip frames if specified
+                if frame_count % skip_frames != 0:
+                    frame_count += 1
+                    continue
+                
+                # Run detection
+                results = model(frame, conf=confidence, verbose=False)
+                
+                detections = []
+                for result in results:
+                    boxes = result.boxes
+                    for box in boxes:
+                        detection = {
+                            "class_id": int(box.cls[0]),
+                            "class_name": model.names[int(box.cls[0])],
+                            "confidence": float(box.conf[0]),
+                            "bbox": {
+                                "x1": float(box.xyxy[0][0]),
+                                "y1": float(box.xyxy[0][1]),
+                                "x2": float(box.xyxy[0][2]),
+                                "y2": float(box.xyxy[0][3])
+                            }
+                        }
+                        detections.append(detection)
+                
+                # Stream frame result
+                yield json.dumps({
+                    "type": "frame",
+                    "frame_number": frame_count,
+                    "timestamp": frame_count / fps if fps > 0 else 0,
+                    "detections": detections,
+                    "count": len(detections)
+                }) + "\n"
+                
+                frame_count += 1
+                processed_count += 1
+            
+            # Send completion message
+            yield json.dumps({
+                "type": "complete",
+                "total_processed": processed_count,
+                "success": True
+            }) + "\n"
+            
+            cap.release()
+            if temp_video_path and os.path.exists(temp_video_path):
+                os.unlink(temp_video_path)
+        
+        return StreamingResponse(
+            generate_results(),
+            media_type="application/x-ndjson"
+        )
     
     except Exception as e:
-        if 'temp_video_path' in locals():
+        if temp_video_path and os.path.exists(temp_video_path):
             try:
                 os.unlink(temp_video_path)
             except:

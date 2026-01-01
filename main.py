@@ -31,20 +31,12 @@ app.add_middleware(
 MODEL_PATH = os.getenv("MODEL_PATH", "model.pt")
 model = None
 
-# NEW: Default configuration
-DEFAULT_CONFIDENCE = 0.25  # Default for image/video endpoints
-WEBSOCKET_MIN_CONFIDENCE = 0.55  # MINIMUM for WebSocket only (enforced)
-DEFAULT_MAX_DETECTIONS = 50  # Maximum detections per frame/image
-
 @app.on_event("startup")
 async def load_model():
     global model
     try:
         model = YOLO(MODEL_PATH)
         print(f"Model loaded successfully from {MODEL_PATH}")
-        print(f"Default confidence threshold: {DEFAULT_CONFIDENCE}")
-        print(f"WebSocket minimum confidence: {WEBSOCKET_MIN_CONFIDENCE}")
-        print(f"Default max detections: {DEFAULT_MAX_DETECTIONS}")
     except Exception as e:
         print(f"Error loading model: {str(e)}")
         raise
@@ -54,11 +46,6 @@ async def root():
     return {
         "message": "YOLOv11 Detection API",
         "status": "running",
-        "default_config": {
-            "confidence_threshold": DEFAULT_CONFIDENCE,
-            "websocket_min_confidence": WEBSOCKET_MIN_CONFIDENCE,
-            "max_detections": DEFAULT_MAX_DETECTIONS
-        },
         "endpoints": {
             "detect_image": "/detect/image - POST image for detection",
             "detect_video": "/detect/video - POST video for detection",
@@ -72,46 +59,18 @@ async def root():
 async def health_check():
     return {
         "status": "healthy",
-        "model_loaded": model is not None,
-        "config": {
-            "confidence_threshold": DEFAULT_CONFIDENCE,
-            "websocket_min_confidence": WEBSOCKET_MIN_CONFIDENCE,
-            "max_detections": DEFAULT_MAX_DETECTIONS
-        }
+        "model_loaded": model is not None
     }
-
-def filter_top_detections(detections: list, max_detections: int) -> list:
-    """
-    Filter detections to keep only top N by confidence score
-    
-    Args:
-        detections: List of detection dictionaries
-        max_detections: Maximum number of detections to keep
-    
-    Returns:
-        Filtered list of detections
-    """
-    if len(detections) <= max_detections:
-        return detections
-    
-    # Sort by confidence (descending) and take top N
-    sorted_detections = sorted(detections, key=lambda x: x['confidence'], reverse=True)
-    return sorted_detections[:max_detections]
 
 # 1. IMAGE DETECTION
 @app.post("/detect/image")
-async def detect_image(
-    file: UploadFile = File(...), 
-    confidence: float = DEFAULT_CONFIDENCE,
-    max_detections: int = DEFAULT_MAX_DETECTIONS
-):
+async def detect_image(file: UploadFile = File(...), confidence: float = 0.25):
     """
     Detect objects in an uploaded image
     
     Args:
         file: Image file (jpg, png, etc.)
-        confidence: Confidence threshold (default: 0.55)
-        max_detections: Maximum number of detections to return (default: 50)
+        confidence: Confidence threshold (default: 0.25)
     
     Returns:
         JSON with detection results
@@ -121,17 +80,6 @@ async def detect_image(
     
     if not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image")
-    
-    # Validate parameters
-    if confidence < 0.0 or confidence > 1.0:
-        raise HTTPException(status_code=400, detail="Confidence must be between 0.0 and 1.0")
-    
-    # ENFORCE MINIMUM CONFIDENCE
-    if confidence < MIN_CONFIDENCE:
-        confidence = MIN_CONFIDENCE
-    
-    if max_detections < 1:
-        raise HTTPException(status_code=400, detail="max_detections must be at least 1")
     
     try:
         contents = await file.read()
@@ -158,23 +106,13 @@ async def detect_image(
                 }
                 detections.append(detection)
         
-        # Apply max detections limit
-        original_count = len(detections)
-        detections = filter_top_detections(detections, max_detections)
-        
         return JSONResponse(content={
             "success": True,
             "detections": detections,
             "count": len(detections),
-            "original_count": original_count,
-            "truncated": original_count > max_detections,
             "image_size": {
                 "width": image.width,
                 "height": image.height
-            },
-            "parameters": {
-                "confidence_threshold": confidence,
-                "max_detections": max_detections
             }
         })
     
@@ -185,8 +123,7 @@ async def detect_image(
 @app.post("/detect/video")
 async def detect_video(
     file: UploadFile = File(...), 
-    confidence: float = DEFAULT_CONFIDENCE,
-    max_detections: int = DEFAULT_MAX_DETECTIONS,
+    confidence: float = 0.25,
     skip_frames: int = 5,
     max_frames: int = 300
 ):
@@ -195,8 +132,7 @@ async def detect_video(
     
     Args:
         file: Video file (mp4, avi, etc.)
-        confidence: Confidence threshold (default: 0.55)
-        max_detections: Maximum detections per frame (default: 50)
+        confidence: Confidence threshold (default: 0.25)
         skip_frames: Process every Nth frame (default: 5 for faster processing)
         max_frames: Maximum frames to process (default: 300)
     
@@ -208,17 +144,6 @@ async def detect_video(
     
     if not file.content_type.startswith("video/"):
         raise HTTPException(status_code=400, detail="File must be a video")
-    
-    # Validate parameters
-    if confidence < 0.0 or confidence > 1.0:
-        raise HTTPException(status_code=400, detail="Confidence must be between 0.0 and 1.0")
-    
-    # ENFORCE MINIMUM CONFIDENCE
-    if confidence < MIN_CONFIDENCE:
-        confidence = MIN_CONFIDENCE
-    
-    if max_detections < 1:
-        raise HTTPException(status_code=400, detail="max_detections must be at least 1")
     
     temp_video_path = None
     
@@ -253,12 +178,7 @@ async def detect_video(
                 "total_frames": total_frames,
                 "width": width,
                 "height": height,
-                "duration_seconds": total_frames / fps if fps > 0 else 0,
-                "parameters": {
-                    "confidence_threshold": confidence,
-                    "max_detections": max_detections,
-                    "skip_frames": skip_frames
-                }
+                "duration_seconds": total_frames / fps if fps > 0 else 0
             }) + "\n"
             
             while cap.isOpened() and processed_count < max_frames:
@@ -291,10 +211,6 @@ async def detect_video(
                         }
                         detections.append(detection)
                 
-                # Apply max detections limit
-                original_count = len(detections)
-                detections = filter_top_detections(detections, max_detections)
-                
                 # Only return frames with detections
                 if len(detections) > 0:
                     # Encode frame as base64 JPEG
@@ -308,8 +224,6 @@ async def detect_video(
                         "timestamp": frame_count / fps if fps > 0 else 0,
                         "detections": detections,
                         "count": len(detections),
-                        "original_count": original_count,
-                        "truncated": original_count > max_detections,
                         "snapshot": frame_base64
                     }) + "\n"
                     
@@ -341,7 +255,7 @@ async def detect_video(
                 pass
         raise HTTPException(status_code=500, detail=f"Video detection failed: {str(e)}")
 
-# 3. REAL-TIME DETECTION (WebSocket) - WITH SNAPSHOTS AND LIMITS!
+# 3. REAL-TIME DETECTION (WebSocket) - NOW WITH SNAPSHOTS!
 @app.websocket("/detect/realtime")
 async def detect_realtime(websocket: WebSocket):
     """
@@ -353,8 +267,7 @@ async def detect_realtime(websocket: WebSocket):
     Message format (from client):
     {
         "image": "base64_encoded_image_string",
-        "confidence": 0.55,  // optional, default 0.55
-        "max_detections": 50,  // optional, default 50
+        "confidence": 0.25,  // optional
         "include_snapshot": true  // optional, default true
     }
     
@@ -363,8 +276,6 @@ async def detect_realtime(websocket: WebSocket):
         "success": true,
         "detections": [...],
         "count": 5,
-        "original_count": 8,
-        "truncated": true,
         "processing_time": 0.123,
         "snapshot": "base64_encoded_annotated_image"  // if include_snapshot=true
     }
@@ -392,13 +303,8 @@ async def detect_realtime(websocket: WebSocket):
                 
                 # Decode base64 image
                 image_data = base64.b64decode(message.get("image", ""))
-                confidence = message.get("confidence", DEFAULT_CONFIDENCE)
-                max_detections = message.get("max_detections", DEFAULT_MAX_DETECTIONS)
+                confidence = message.get("confidence", 0.25)
                 include_snapshot = message.get("include_snapshot", True)
-                
-                # Validate parameters
-                confidence = max(MIN_CONFIDENCE, min(1.0, confidence))  # Enforce minimum
-                max_detections = max(1, max_detections)
                 
                 # Convert to numpy array
                 nparr = np.frombuffer(image_data, np.uint8)
@@ -438,57 +344,48 @@ async def detect_realtime(websocket: WebSocket):
                             }
                         }
                         detections.append(detection)
-                
-                # Apply max detections limit
-                original_count = len(detections)
-                detections = filter_top_detections(detections, max_detections)
-                
-                # Draw bounding boxes for filtered detections
-                if include_snapshot:
-                    for detection in detections:
-                        bbox = detection['bbox']
-                        x1, y1 = int(bbox['x1']), int(bbox['y1'])
-                        x2, y2 = int(bbox['x2']), int(bbox['y2'])
                         
-                        # Draw rectangle
-                        cv2.rectangle(
-                            annotated_img,
-                            (x1, y1),
-                            (x2, y2),
-                            (0, 255, 0),  # Green color
-                            2
-                        )
-                        
-                        # Prepare label text
-                        label = f"{detection['class_name']} {detection['confidence']:.2f}"
-                        
-                        # Get text size for background
-                        (text_width, text_height), baseline = cv2.getTextSize(
-                            label,
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.5,
-                            1
-                        )
-                        
-                        # Draw label background
-                        cv2.rectangle(
-                            annotated_img,
-                            (x1, y1 - text_height - 10),
-                            (x1 + text_width, y1),
-                            (0, 255, 0),
-                            -1
-                        )
-                        
-                        # Draw label text
-                        cv2.putText(
-                            annotated_img,
-                            label,
-                            (x1, y1 - 5),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.5,
-                            (0, 0, 0),
-                            1
-                        )
+                        # Draw bounding box on image if snapshot requested
+                        if include_snapshot:
+                            # Draw rectangle
+                            cv2.rectangle(
+                                annotated_img,
+                                (int(x1), int(y1)),
+                                (int(x2), int(y2)),
+                                (0, 255, 0),  # Green color
+                                2
+                            )
+                            
+                            # Prepare label text
+                            label = f"{class_name} {conf:.2f}"
+                            
+                            # Get text size for background
+                            (text_width, text_height), baseline = cv2.getTextSize(
+                                label,
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.5,
+                                1
+                            )
+                            
+                            # Draw label background
+                            cv2.rectangle(
+                                annotated_img,
+                                (int(x1), int(y1) - text_height - 10),
+                                (int(x1) + text_width, int(y1)),
+                                (0, 255, 0),
+                                -1
+                            )
+                            
+                            # Draw label text
+                            cv2.putText(
+                                annotated_img,
+                                label,
+                                (int(x1), int(y1) - 5),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.5,
+                                (0, 0, 0),
+                                1
+                            )
                 
                 processing_time = time.time() - start_time
                 
@@ -497,16 +394,10 @@ async def detect_realtime(websocket: WebSocket):
                     "success": True,
                     "detections": detections,
                     "count": len(detections),
-                    "original_count": original_count,
-                    "truncated": original_count > max_detections,
                     "processing_time": round(processing_time, 3),
                     "image_size": {
                         "width": img.shape[1],
                         "height": img.shape[0]
-                    },
-                    "parameters": {
-                        "confidence_threshold": confidence,
-                        "max_detections": max_detections
                     }
                 }
                 

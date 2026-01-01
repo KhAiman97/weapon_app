@@ -32,7 +32,8 @@ MODEL_PATH = os.getenv("MODEL_PATH", "model.pt")
 model = None
 
 # NEW: Default configuration
-DEFAULT_CONFIDENCE = 0.55  # Increased from 0.25 to 0.55 (55%)
+DEFAULT_CONFIDENCE = 0.25  # Default for image/video endpoints
+WEBSOCKET_MIN_CONFIDENCE = 0.55  # MINIMUM for WebSocket only (enforced)
 DEFAULT_MAX_DETECTIONS = 50  # Maximum detections per frame/image
 
 @app.on_event("startup")
@@ -42,6 +43,7 @@ async def load_model():
         model = YOLO(MODEL_PATH)
         print(f"Model loaded successfully from {MODEL_PATH}")
         print(f"Default confidence threshold: {DEFAULT_CONFIDENCE}")
+        print(f"WebSocket minimum confidence: {WEBSOCKET_MIN_CONFIDENCE}")
         print(f"Default max detections: {DEFAULT_MAX_DETECTIONS}")
     except Exception as e:
         print(f"Error loading model: {str(e)}")
@@ -54,6 +56,7 @@ async def root():
         "status": "running",
         "default_config": {
             "confidence_threshold": DEFAULT_CONFIDENCE,
+            "websocket_min_confidence": WEBSOCKET_MIN_CONFIDENCE,
             "max_detections": DEFAULT_MAX_DETECTIONS
         },
         "endpoints": {
@@ -72,6 +75,7 @@ async def health_check():
         "model_loaded": model is not None,
         "config": {
             "confidence_threshold": DEFAULT_CONFIDENCE,
+            "websocket_min_confidence": WEBSOCKET_MIN_CONFIDENCE,
             "max_detections": DEFAULT_MAX_DETECTIONS
         }
     }
@@ -121,6 +125,10 @@ async def detect_image(
     # Validate parameters
     if confidence < 0.0 or confidence > 1.0:
         raise HTTPException(status_code=400, detail="Confidence must be between 0.0 and 1.0")
+    
+    # ENFORCE MINIMUM CONFIDENCE
+    if confidence < MIN_CONFIDENCE:
+        confidence = MIN_CONFIDENCE
     
     if max_detections < 1:
         raise HTTPException(status_code=400, detail="max_detections must be at least 1")
@@ -204,6 +212,10 @@ async def detect_video(
     # Validate parameters
     if confidence < 0.0 or confidence > 1.0:
         raise HTTPException(status_code=400, detail="Confidence must be between 0.0 and 1.0")
+    
+    # ENFORCE MINIMUM CONFIDENCE
+    if confidence < MIN_CONFIDENCE:
+        confidence = MIN_CONFIDENCE
     
     if max_detections < 1:
         raise HTTPException(status_code=400, detail="max_detections must be at least 1")
@@ -385,7 +397,7 @@ async def detect_realtime(websocket: WebSocket):
                 include_snapshot = message.get("include_snapshot", True)
                 
                 # Validate parameters
-                confidence = max(0.0, min(1.0, confidence))
+                confidence = max(MIN_CONFIDENCE, min(1.0, confidence))  # Enforce minimum
                 max_detections = max(1, max_detections)
                 
                 # Convert to numpy array

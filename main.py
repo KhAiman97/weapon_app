@@ -14,7 +14,6 @@ import asyncio
 from typing import List
 import json
 import warnings
-
 # Suppress NNPACK warnings
 warnings.filterwarnings('ignore', category=UserWarning)
 
@@ -51,7 +50,8 @@ async def root():
             "detect_image": "/detect/image - POST image for detection",
             "detect_video": "/detect/video - POST video for detection",
             "realtime": "/detect/realtime - WebSocket for real-time detection",
-            "health": "/health - Check API health"
+            "health": "/health - Check API health",
+            "model_classes": "/model/classes - GET list of detectable classes"
         }
     }
 
@@ -255,19 +255,20 @@ async def detect_video(
                 pass
         raise HTTPException(status_code=500, detail=f"Video detection failed: {str(e)}")
 
-# 3. REAL-TIME DETECTION (WebSocket)
+# 3. REAL-TIME DETECTION (WebSocket) - NOW WITH SNAPSHOTS!
 @app.websocket("/detect/realtime")
 async def detect_realtime(websocket: WebSocket):
     """
-    Real-time object detection via WebSocket
+    Real-time object detection via WebSocket with annotated snapshots
     
     Client should send base64-encoded images
-    Server responds with detection results
+    Server responds with detection results AND annotated snapshot
     
     Message format (from client):
     {
         "image": "base64_encoded_image_string",
-        "confidence": 0.25  // optional
+        "confidence": 0.25,  // optional
+        "include_snapshot": true  // optional, default true
     }
     
     Response format (from server):
@@ -275,7 +276,8 @@ async def detect_realtime(websocket: WebSocket):
         "success": true,
         "detections": [...],
         "count": 5,
-        "processing_time": 0.123
+        "processing_time": 0.123,
+        "snapshot": "base64_encoded_annotated_image"  // if include_snapshot=true
     }
     """
     await websocket.accept()
@@ -302,6 +304,7 @@ async def detect_realtime(websocket: WebSocket):
                 # Decode base64 image
                 image_data = base64.b64decode(message.get("image", ""))
                 confidence = message.get("confidence", 0.25)
+                include_snapshot = message.get("include_snapshot", True)
                 
                 # Convert to numpy array
                 nparr = np.frombuffer(image_data, np.uint8)
@@ -315,29 +318,79 @@ async def detect_realtime(websocket: WebSocket):
                     continue
                 
                 # Run detection
-                results = model(img, conf=confidence)
+                results = model(img, conf=confidence, verbose=False)
                 
                 detections = []
+                annotated_img = img.copy()
+                
                 for result in results:
                     boxes = result.boxes
                     for box in boxes:
+                        # Extract detection info
+                        x1, y1, x2, y2 = box.xyxy[0]
+                        class_id = int(box.cls[0])
+                        class_name = model.names[class_id]
+                        conf = float(box.conf[0])
+                        
                         detection = {
-                            "class_id": int(box.cls[0]),
-                            "class_name": model.names[int(box.cls[0])],
-                            "confidence": float(box.conf[0]),
+                            "class_id": class_id,
+                            "class_name": class_name,
+                            "confidence": conf,
                             "bbox": {
-                                "x1": float(box.xyxy[0][0]),
-                                "y1": float(box.xyxy[0][1]),
-                                "x2": float(box.xyxy[0][2]),
-                                "y2": float(box.xyxy[0][3])
+                                "x1": float(x1),
+                                "y1": float(y1),
+                                "x2": float(x2),
+                                "y2": float(y2)
                             }
                         }
                         detections.append(detection)
+                        
+                        # Draw bounding box on image if snapshot requested
+                        if include_snapshot:
+                            # Draw rectangle
+                            cv2.rectangle(
+                                annotated_img,
+                                (int(x1), int(y1)),
+                                (int(x2), int(y2)),
+                                (0, 255, 0),  # Green color
+                                2
+                            )
+                            
+                            # Prepare label text
+                            label = f"{class_name} {conf:.2f}"
+                            
+                            # Get text size for background
+                            (text_width, text_height), baseline = cv2.getTextSize(
+                                label,
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.5,
+                                1
+                            )
+                            
+                            # Draw label background
+                            cv2.rectangle(
+                                annotated_img,
+                                (int(x1), int(y1) - text_height - 10),
+                                (int(x1) + text_width, int(y1)),
+                                (0, 255, 0),
+                                -1
+                            )
+                            
+                            # Draw label text
+                            cv2.putText(
+                                annotated_img,
+                                label,
+                                (int(x1), int(y1) - 5),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.5,
+                                (0, 0, 0),
+                                1
+                            )
                 
                 processing_time = time.time() - start_time
                 
-                # Send results back
-                await websocket.send_json({
+                # Prepare response
+                response = {
                     "success": True,
                     "detections": detections,
                     "count": len(detections),
@@ -346,7 +399,16 @@ async def detect_realtime(websocket: WebSocket):
                         "width": img.shape[1],
                         "height": img.shape[0]
                     }
-                })
+                }
+                
+                # Add annotated snapshot if requested
+                if include_snapshot:
+                    _, buffer = cv2.imencode('.jpg', annotated_img)
+                    snapshot_base64 = base64.b64encode(buffer).decode('utf-8')
+                    response["snapshot"] = snapshot_base64
+                
+                # Send results back
+                await websocket.send_json(response)
                 
             except json.JSONDecodeError:
                 await websocket.send_json({
@@ -368,10 +430,27 @@ async def detect_realtime(websocket: WebSocket):
         except:
             pass
 
+@app.get("/model/classes")
+async def get_model_classes():
+    """
+    Get list of classes the model can detect
+    
+    Returns:
+        JSON with class names and IDs
+    """
+    if model is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+    
+    return {
+        "classes": model.names,
+        "total_classes": len(model.names),
+        "class_list": [{"id": k, "name": v} for k, v in model.names.items()]
+    }
+
 if __name__ == "__main__":
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=int(os.getenv("PORT", 8000)),
+        port=int(os.getenv("PORT", 7860)),
         reload=False
     )
